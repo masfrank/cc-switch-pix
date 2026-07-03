@@ -97,6 +97,44 @@ fn make_error(msg: String) -> SubscriptionQuota {
     }
 }
 
+/// 检测 MiniMax `/coding_plan/remains` 响应是否是"占位零值"。
+///
+/// 缺 GroupId（或者 GroupId 填错）时，接口仍返回 `status_code=0`，但所有
+/// `model_remains[*]` 条目的 `current_*_total_count` 与 `current_*_usage_count`
+/// 都是 0，且 `current_*_remaining_percent` 都是 100。这种数据计算出的
+/// 利用率恒为 0%，会误显示"已用 0%"。需要在 `query_minimax` 里识别并报错。
+fn looks_like_placeholder_payload(body: &serde_json::Value) -> bool {
+    let Some(model_remains) = body.get("model_remains").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    if model_remains.is_empty() {
+        return false;
+    }
+    model_remains.iter().all(|item| {
+        let total_interval = item
+            .get("current_interval_total_count")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let total_weekly = item
+            .get("current_weekly_total_count")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let pct_interval = item
+            .get("current_interval_remaining_percent")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let pct_weekly = item
+            .get("current_weekly_remaining_percent")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        // 占位的形态：所有 total_count 都为 0，且所有 remaining_percent 都为 100
+        total_interval == 0.0
+            && total_weekly == 0.0
+            && pct_interval == 100.0
+            && pct_weekly == 100.0
+    })
+}
+
 // ── Kimi For Coding ─────────────────────────────────────────
 
 async fn query_kimi(api_key: &str) -> SubscriptionQuota {
@@ -161,6 +199,9 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
                     resets_at,
                     used_value_usd: None,
                     max_value_usd: None,
+                    used_count: None,
+                    total_count: None,
+                    count_unit: None,
                 });
             }
         }
@@ -184,6 +225,9 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
             resets_at,
             used_value_usd: None,
             max_value_usd: None,
+            used_count: None,
+            total_count: None,
+            count_unit: None,
         });
     }
 
@@ -285,6 +329,9 @@ fn parse_zhipu_token_tiers(data: &serde_json::Value) -> Vec<QuotaTier> {
                 resets_at,
                 used_value_usd: None,
                 max_value_usd: None,
+                used_count: None,
+                total_count: None,
+                count_unit: None,
             });
         }
     }
@@ -388,7 +435,7 @@ async fn query_zhipu(base_url: &str, api_key: &str) -> SubscriptionQuota {
 
 // ── MiniMax ─────────────────────────────────────────────────
 
-async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
+async fn query_minimax(api_key: &str, is_cn: bool, group_id: Option<&str>) -> SubscriptionQuota {
     let client = crate::proxy::http_client::get();
 
     let api_domain = if is_cn {
@@ -396,7 +443,13 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
     } else {
         "api.minimax.io"
     };
-    let url = format!("https://{api_domain}/v1/api/openplatform/coding_plan/remains");
+    // 缺 GroupId 时接口返回占位零值（current_*_count=0 / *_total_count=0），
+    // 误显示为 0%，需要用户从账户中心粘贴自己的 GroupId 才能取到真实数据。
+    let mut url = format!("https://{api_domain}/v1/api/openplatform/coding_plan/remains");
+    if let Some(g) = group_id.map(str::trim).filter(|s| !s.is_empty()) {
+        url.push_str("?GroupId=");
+        url.push_str(g);
+    }
 
     let resp = client
         .get(&url)
@@ -446,12 +499,37 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
                 .get("status_msg")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown error");
-            return make_error(format!("API error (code {status_code}): {msg}"));
+            // 1004 + "GroupId" 字样:用户没填或填错了 GroupId,直接给可操作的提示
+            let friendly = if status_code == 1004 && msg.to_lowercase().contains("groupid") {
+                "MiniMax usage API requires a valid Group ID (设置 → 用量查询 → 集团 ID). \
+                 Find it in the MiniMax open platform under Account → Basic Information."
+                    .to_string()
+            } else {
+                format!("API error (code {status_code}): {msg}")
+            };
+            return make_error(friendly);
         }
     }
 
-    // 提取纯函数便于无 mock 单元测试;新接口直接给"剩余百分比",反转为已用百分比
     let tiers = parse_minimax_tiers(&body);
+
+    // 关键守卫：缺 GroupId 时接口返回 status_code=0 + 所有 model_remains 都是占位零值
+    // （total_count=0 / remaining_percent=100），会算出 0% 利用率导致误显示。
+    // 此时不展示假的「0%」条，改为明确报错，提示用户去填 GroupId。
+    if tiers.is_empty()
+        || tiers
+            .iter()
+            .all(|t| t.utilization == 0.0 && t.used_count.is_none_or(|u| u == 0.0))
+    {
+        // 仅当 body 看起来就是占位形态时再判（避免误伤其它空 quota 场景）
+        if looks_like_placeholder_payload(&body) {
+            return make_error(
+                "MiniMax usage API returned placeholder data. Set the Group ID in Coding Plan \
+                 settings (MiniMax 开放平台 → 账户管理 → 账户信息 → 基本信息)."
+                    .to_string(),
+            );
+        }
+    }
 
     SubscriptionQuota {
         tool: "coding_plan".to_string(),
@@ -541,6 +619,9 @@ async fn query_zenmux(base_url: &str, api_key: &str) -> SubscriptionQuota {
             resets_at,
             used_value_usd: used_usd,
             max_value_usd: max_usd,
+            used_count: None,
+            total_count: None,
+            count_unit: None,
         });
     }
 
@@ -562,6 +643,9 @@ async fn query_zenmux(base_url: &str, api_key: &str) -> SubscriptionQuota {
             resets_at,
             used_value_usd: used_usd,
             max_value_usd: max_usd,
+            used_count: None,
+            total_count: None,
+            count_unit: None,
         });
     }
 
@@ -603,8 +687,13 @@ async fn query_zenmux(base_url: &str, api_key: &str) -> SubscriptionQuota {
 /// `model_remains` 数组里有 `general`(编程套餐)和 `video` 等其他模型,
 /// 这里只取 `general`,跳过 video。
 ///
-/// 5h 桶始终存在;周桶并非所有套餐都有,靠 `current_weekly_status == 1`
-/// 判定激活(无周限额套餐该字段为 3,`remaining_percent` 恒为 100,不应展示)。
+/// 5h 桶始终存在;周桶激活条件放宽：
+///   - status=1: 有周限额且可用
+///   - status=2: 有周限额但已耗尽（**这是用户最该看到的状态**——旧版
+///     误以为 "套餐无周限额" 把 tier 整个丢掉，导致 7d 100% 时 bar
+///     不显示）
+///   - status=3: 该套餐无周限额，跳过（remaining_percent 恒为 100）
+/// 旧版只接受 status=1，结果 status=2（Exhausted）的真实数据被吞。
 fn parse_minimax_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
     let mut tiers = Vec::new();
 
@@ -622,40 +711,100 @@ fn parse_minimax_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
         return tiers;
     };
 
-    // 5h 桶:剩余百分比 → 已用百分比
-    if let Some(remain_pct) = item
+    // ── 5h 桶 ──────────────────────────────────────────────────
+    // 数据源优先级（与官方 web 展示口径对齐）：
+    //   1) 绝对数 current_interval_usage_count / current_interval_total_count
+    //      → 7/100 形式。这是官方 web 显示 "已用 X / 总额度 Y" 的来源。
+    //   2) 回退到 current_interval_remaining_percent（某些情况下官方不返回
+    //      绝对数，比如 5h 窗口刚 reset、total_count=0 时）。
+    let five_hour_total = item
+        .get("current_interval_total_count")
+        .and_then(|v| v.as_f64())
+        .filter(|n| *n > 0.0);
+    let five_hour_used = item
+        .get("current_interval_usage_count")
+        .and_then(|v| v.as_f64());
+    let five_hour_resets_at = item
+        .get("end_time")
+        .and_then(|v| v.as_i64())
+        .and_then(millis_to_iso8601);
+
+    if let Some(total) = five_hour_total {
+        let used = five_hour_used.unwrap_or(0.0).clamp(0.0, total);
+        let utilization = if total > 0.0 { used / total * 100.0 } else { 0.0 };
+        tiers.push(QuotaTier {
+            name: TIER_FIVE_HOUR.to_string(),
+            utilization,
+            resets_at: five_hour_resets_at,
+            used_value_usd: None,
+            max_value_usd: None,
+            used_count: Some(used),
+            total_count: Some(total),
+            count_unit: Some("count".to_string()),
+        });
+    } else if let Some(remain_pct) = item
         .get("current_interval_remaining_percent")
         .and_then(|v| v.as_f64())
     {
-        let resets_at = item
-            .get("end_time")
-            .and_then(|v| v.as_i64())
-            .and_then(millis_to_iso8601);
+        // 5h 窗口无绝对数（reset 期 / 该套餐无 5h 桶）——回退到剩余百分比
         tiers.push(QuotaTier {
             name: TIER_FIVE_HOUR.to_string(),
             utilization: 100.0 - remain_pct,
-            resets_at,
+            resets_at: five_hour_resets_at,
             used_value_usd: None,
             max_value_usd: None,
+            used_count: None,
+            total_count: None,
+            count_unit: None,
         });
     }
 
-    // 周桶:仅当 status=1 时激活;status=3 等表示该套餐无周限额,跳过
-    if item.get("current_weekly_status").and_then(|v| v.as_i64()) == Some(1) {
-        if let Some(remain_pct) = item
+    // ── 周桶 ──────────────────────────────────────────────────
+    // status=1 (Available) 或 2 (Exhausted) 都视为「有周限额」，需要展示。
+    // status=3 (该套餐无周限额) 跳过——见函数 docstring。
+    let weekly_status = item
+        .get("current_weekly_status")
+        .and_then(|v| v.as_i64());
+    if matches!(weekly_status, Some(1) | Some(2)) {
+        let weekly_total = item
+            .get("current_weekly_total_count")
+            .and_then(|v| v.as_f64())
+            .filter(|n| *n > 0.0);
+        let weekly_used = item
+            .get("current_weekly_usage_count")
+            .and_then(|v| v.as_f64());
+        let weekly_resets_at = item
+            .get("weekly_end_time")
+            .and_then(|v| v.as_i64())
+            .and_then(millis_to_iso8601);
+
+        if let Some(total) = weekly_total {
+            let used = weekly_used.unwrap_or(0.0).clamp(0.0, total);
+            let utilization = if total > 0.0 { used / total * 100.0 } else { 0.0 };
+            tiers.push(QuotaTier {
+                name: TIER_WEEKLY_LIMIT.to_string(),
+                utilization,
+                resets_at: weekly_resets_at,
+                used_value_usd: None,
+                max_value_usd: None,
+                used_count: Some(used),
+                total_count: Some(total),
+                count_unit: Some("count".to_string()),
+            });
+        } else if let Some(remain_pct) = item
             .get("current_weekly_remaining_percent")
             .and_then(|v| v.as_f64())
         {
-            let resets_at = item
-                .get("weekly_end_time")
-                .and_then(|v| v.as_i64())
-                .and_then(millis_to_iso8601);
+            // 周桶无绝对数,回退到剩余百分比
             tiers.push(QuotaTier {
                 name: TIER_WEEKLY_LIMIT.to_string(),
                 utilization: 100.0 - remain_pct,
-                resets_at,
+                resets_at: weekly_resets_at,
                 used_value_usd: None,
                 max_value_usd: None,
+                used_count: None,
+                total_count: None,
+                count_unit: None,
             });
         }
     }
@@ -964,6 +1113,9 @@ fn parse_afp_tiers(result: &serde_json::Value) -> Vec<QuotaTier> {
             resets_at,
             used_value_usd: None,
             max_value_usd: None,
+            used_count: None,
+            total_count: None,
+            count_unit: None,
         });
     }
     tiers
@@ -1023,6 +1175,9 @@ fn parse_coding_plan_tiers(result: &serde_json::Value) -> Vec<QuotaTier> {
             resets_at,
             used_value_usd: None,
             max_value_usd: None,
+            used_count: None,
+            total_count: None,
+            count_unit: None,
         });
     }
     tiers
@@ -1148,6 +1303,7 @@ pub async fn get_coding_plan_quota(
     api_key: &str,
     access_key_id: Option<&str>,
     secret_access_key: Option<&str>,
+    group_id: Option<&str>,
 ) -> Result<SubscriptionQuota, String> {
     let provider = match detect_provider(base_url) {
         Some(p) => p,
@@ -1179,8 +1335,8 @@ pub async fn get_coding_plan_quota(
         CodingPlanProvider::ZhipuCn | CodingPlanProvider::ZhipuEn => {
             query_zhipu(base_url, api_key).await
         }
-        CodingPlanProvider::MiniMaxCn => query_minimax(api_key, true).await,
-        CodingPlanProvider::MiniMaxEn => query_minimax(api_key, false).await,
+        CodingPlanProvider::MiniMaxCn => query_minimax(api_key, true, group_id).await,
+        CodingPlanProvider::MiniMaxEn => query_minimax(api_key, false, group_id).await,
         CodingPlanProvider::ZenMux => query_zenmux(base_url, api_key).await,
         // 火山已在上面的 AK/SK 分支提前返回，此处不可达。
         CodingPlanProvider::Volcengine => {
@@ -1194,10 +1350,10 @@ pub async fn get_coding_plan_quota(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_afp_tiers, parse_coding_plan_tiers, parse_minimax_tiers, parse_zhipu_token_tiers,
-        volcengine_canonical_query, volcengine_is_auth_error_code, volcengine_region,
-        volcengine_response_error, volcengine_sign, zhipu_quota_base, TIER_FIVE_HOUR, TIER_MONTHLY,
-        TIER_WEEKLY_LIMIT,
+        looks_like_placeholder_payload, parse_afp_tiers, parse_coding_plan_tiers,
+        parse_minimax_tiers, parse_zhipu_token_tiers, volcengine_canonical_query,
+        volcengine_is_auth_error_code, volcengine_region, volcengine_response_error,
+        volcengine_sign, zhipu_quota_base, TIER_FIVE_HOUR, TIER_MONTHLY, TIER_WEEKLY_LIMIT,
     };
     use serde_json::json;
 
@@ -1536,6 +1692,128 @@ mod tests {
     }
 
     #[test]
+    fn minimax_prefers_absolute_count_over_remaining_percent() {
+        // 主路径:官方 web 同时返回绝对值与剩余百分比时,应优先用绝对值。
+        // 例:5h 总额度 100 / 已用 7 → 7% + 绝对值 7/100。
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 100.0,
+                "current_interval_usage_count": 7.0,
+                "current_weekly_total_count": 150.0,
+                "current_weekly_usage_count": 20.0,
+                "current_interval_remaining_percent": 93.0,  // 一致:7% 已用
+                "current_weekly_remaining_percent": 87.0,    // 13.3% 已用
+                "current_interval_status": 1,
+                "current_weekly_status": 1
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        // 走绝对值路径,utilization = 7/100*100 = 7（浮点允许小幅误差）
+        assert!((tiers[0].utilization - 7.0).abs() < 1e-9);
+        assert_eq!(tiers[0].used_count, Some(7.0));
+        assert_eq!(tiers[0].total_count, Some(100.0));
+        assert_eq!(tiers[0].count_unit.as_deref(), Some("count"));
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        // 20/150*100 = 13.33...
+        assert!((tiers[1].utilization - 13.3333).abs() < 0.01);
+        assert_eq!(tiers[1].used_count, Some(20.0));
+        assert_eq!(tiers[1].total_count, Some(150.0));
+    }
+
+    #[test]
+    fn minimax_detects_placeholder_payload_when_groupid_missing() {
+        // 缺 GroupId 时接口返回 status_code=0,但所有 *_total_count=0
+        // 且所有 *_remaining_percent=100。识别为占位数据,避免误显示 0%。
+        let body = json!({
+            "model_remains": [
+                {
+                    "model_name": "general",
+                    "current_interval_total_count": 0,
+                    "current_interval_usage_count": 0,
+                    "current_weekly_total_count": 0,
+                    "current_weekly_usage_count": 0,
+                    "current_interval_remaining_percent": 100,
+                    "current_weekly_remaining_percent": 100,
+                    "current_interval_status": 1,
+                    "current_weekly_status": 1
+                },
+                {
+                    "model_name": "video",
+                    "current_interval_total_count": 0,
+                    "current_interval_usage_count": 0,
+                    "current_weekly_total_count": 0,
+                    "current_weekly_usage_count": 0,
+                    "current_interval_remaining_percent": 100,
+                    "current_weekly_remaining_percent": 100
+                }
+            ],
+            "base_resp": { "status_code": 0, "status_msg": "success" }
+        });
+        assert!(looks_like_placeholder_payload(&body));
+    }
+
+    #[test]
+    fn minimax_placeholder_detector_ignores_real_data() {
+        // 任意 *_total_count > 0 → 不是占位
+        let real = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 100,
+                "current_interval_usage_count": 7,
+                "current_weekly_total_count": 150,
+                "current_weekly_usage_count": 20,
+                "current_interval_remaining_percent": 93,
+                "current_weekly_remaining_percent": 87
+            }]
+        });
+        assert!(!looks_like_placeholder_payload(&real));
+
+        // 5h 刚 reset（total=0）但周桶有数据 → 也不是占位
+        let mixed = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 0,
+                "current_interval_usage_count": 0,
+                "current_weekly_total_count": 150,
+                "current_weekly_usage_count": 20,
+                "current_interval_remaining_percent": 100,
+                "current_weekly_remaining_percent": 87
+            }]
+        });
+        assert!(!looks_like_placeholder_payload(&mixed));
+    }
+
+    #[test]
+    fn minimax_falls_back_to_remaining_percent_when_total_zero() {
+        // 兜底:5h 窗口刚 reset,total_count=0 → 走 remaining_percent 路径。
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 0.0,
+                "current_interval_usage_count": 0.0,
+                "current_weekly_total_count": 150.0,
+                "current_weekly_usage_count": 20.0,
+                "current_interval_remaining_percent": 100.0,
+                "current_weekly_remaining_percent": 87.0,
+                "current_interval_status": 1,
+                "current_weekly_status": 1
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 2);
+        // 5h:无绝对值,remaining 100% → 已用 0%
+        assert_eq!(tiers[0].utilization, 0.0);
+        assert!(tiers[0].used_count.is_none());
+        assert!(tiers[0].total_count.is_none());
+        // 7d:有绝对值,走绝对值路径
+        assert_eq!(tiers[1].used_count, Some(20.0));
+        assert_eq!(tiers[1].total_count, Some(150.0));
+    }
+
+    #[test]
     fn minimax_weekly_status_3_skips_weekly_tier() {
         // 无周限额套餐:current_weekly_status=3,remaining_percent 恒为 100,
         // 不应推 weekly_limit tier(否则会显示"0% 已用"的假周桶)
@@ -1573,20 +1851,32 @@ mod tests {
     }
 
     #[test]
-    fn minimax_weekly_status_2_also_skips_weekly_tier() {
-        // 防御性:除 1 之外的 status 都视为周桶未激活,跳过
+    fn minimax_weekly_status_2_includes_weekly_tier_at_100_percent() {
+        // 修复回归:之前 status=2 (Exhausted) 被误判为「无周限额」跳过，
+        // 导致 7d 100% 时 bar 不显示。status=1/2 都视为「有周限额」——
+        // status=2 的 remaining=0 会自然算出 100% utilization。
         let body = json!({
             "model_remains": [{
                 "model_name": "general",
                 "current_interval_remaining_percent": 80.0,
-                "current_weekly_remaining_percent": 50.0,
-                "current_weekly_status": 2
+                "current_interval_remaining_percent_for_status": null,
+                "current_interval_status": 1,
+                "current_weekly_remaining_percent": 0.0,
+                "current_weekly_status": 2,
+                "current_weekly_total_count": 100.0,
+                "current_weekly_usage_count": 100.0,
+                "weekly_end_time": 1_783_267_200_000_i64
             }]
         });
         let tiers = parse_minimax_tiers(&body);
-        assert_eq!(tiers.len(), 1);
-        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
-        assert_eq!(tiers[0].utilization, 20.0);
+        // 5h + 7d 两个 tier 都该出现；7d 100%
+        assert_eq!(tiers.len(), 2);
+        let weekly = tiers.iter().find(|t| t.name == TIER_WEEKLY_LIMIT).unwrap();
+        assert!(
+            (weekly.utilization - 100.0).abs() < 0.01,
+            "weekly utilization 应为 100%, 实际 {}",
+            weekly.utilization
+        );
     }
 
     #[test]

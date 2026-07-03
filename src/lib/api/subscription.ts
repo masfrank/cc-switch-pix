@@ -12,12 +12,15 @@ export const subscriptionApi = {
     // 火山方舟用账号 AK/SK 签名查询用量；其他供应商不传。
     accessKeyId?: string,
     secretAccessKey?: string,
+    // MiniMax Coding Plan 集团 ID；缺省时接口返回占位零值导致误显示 0%。
+    groupId?: string,
   ): Promise<SubscriptionQuota> =>
     invoke("get_coding_plan_quota", {
       baseUrl,
       apiKey,
       accessKeyId,
       secretAccessKey,
+      groupId,
     }),
   getBalance: (
     baseUrl: string,
