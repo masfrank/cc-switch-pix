@@ -197,11 +197,7 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
                     name: "five_hour".to_string(),
                     utilization,
                     resets_at,
-                    used_value_usd: None,
-                    max_value_usd: None,
-                    used_count: None,
-                    total_count: None,
-                    count_unit: None,
+                    ..Default::default()
                 });
             }
         }
@@ -223,11 +219,7 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
             name: "weekly_limit".to_string(),
             utilization,
             resets_at,
-            used_value_usd: None,
-            max_value_usd: None,
-            used_count: None,
-            total_count: None,
-            count_unit: None,
+            ..Default::default()
         });
     }
 
@@ -327,11 +319,7 @@ fn parse_zhipu_token_tiers(data: &serde_json::Value) -> Vec<QuotaTier> {
                 name: name.to_string(),
                 utilization: percentage,
                 resets_at,
-                used_value_usd: None,
-                max_value_usd: None,
-                used_count: None,
-                total_count: None,
-                count_unit: None,
+                ..Default::default()
             });
         }
     }
@@ -619,9 +607,7 @@ async fn query_zenmux(base_url: &str, api_key: &str) -> SubscriptionQuota {
             resets_at,
             used_value_usd: used_usd,
             max_value_usd: max_usd,
-            used_count: None,
-            total_count: None,
-            count_unit: None,
+            ..Default::default()
         });
     }
 
@@ -643,9 +629,7 @@ async fn query_zenmux(base_url: &str, api_key: &str) -> SubscriptionQuota {
             resets_at,
             used_value_usd: used_usd,
             max_value_usd: max_usd,
-            used_count: None,
-            total_count: None,
-            count_unit: None,
+            ..Default::default()
         });
     }
 
@@ -697,6 +681,16 @@ async fn query_zenmux(base_url: &str, api_key: &str) -> SubscriptionQuota {
 fn parse_minimax_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
     let mut tiers = Vec::new();
 
+    // MiniMax Coding Plan API 在某些时刻会省略 *_total_count 和 *_usage_count 字段,
+    // 只回 *_remaining_percent,导致 UI 只能显示百分比（"72%"）而不能显示绝对数（"108/150"）。
+    // 这里用 weekly_boost_permille (千分位) 推算 total：实测 `1500` → `1.5x` boost，
+    // 配合 MiniMax 官方 web 显示口径（"108/150"）反推：base=100, total = 100 × 1.5 = 150。
+    // 当 *_total_count 显式给时优先用 API 的值。
+    // 5h 桶当前用户只需百分比,故 5h base 不在此处使用——保留为常量以备未来。
+    const MINIMAX_BASE_WEEKLY_TOTAL: f64 = 100.0;
+    #[allow(dead_code)]
+    const MINIMAX_BASE_5H_TOTAL: f64 = 500.0;
+
     let Some(model_remains) = body.get("model_remains").and_then(|v| v.as_array()) else {
         return tiers;
     };
@@ -728,9 +722,16 @@ fn parse_minimax_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
         .get("end_time")
         .and_then(|v| v.as_i64())
         .and_then(millis_to_iso8601);
+    let five_hour_remains_ms = item
+        .get("remains_time")
+        .and_then(|v| v.as_i64())
+        .filter(|n| *n > 0);
 
     if let Some(total) = five_hour_total {
-        let used = five_hour_used.unwrap_or(0.0).clamp(0.0, total);
+        // 不再 clamp 到 total 上限——超额（used > total）场景下保留原始值，
+        // 让 utilization 准确反映「已用 > 总额度」的真实状态（如 105%）。
+        // UI 进度条宽度仍由前端用 min(utilization, 100) 截断显示。
+        let used = five_hour_used.unwrap_or(0.0).max(0.0);
         let utilization = if total > 0.0 { used / total * 100.0 } else { 0.0 };
         tiers.push(QuotaTier {
             name: TIER_FIVE_HOUR.to_string(),
@@ -741,21 +742,34 @@ fn parse_minimax_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
             used_count: Some(used),
             total_count: Some(total),
             count_unit: Some("count".to_string()),
+            remains_time_ms: five_hour_remains_ms,
         });
     } else if let Some(remain_pct) = item
         .get("current_interval_remaining_percent")
         .and_then(|v| v.as_f64())
     {
-        // 5h 窗口无绝对数（reset 期 / 该套餐无 5h 桶）——回退到剩余百分比
+        // 5h 窗口无绝对数（reset 期 / 该套餐无 5h 桶）——回退到剩余百分比。
+        // 若同时给了 current_interval_total_count，用它推算 used 让 UI 仍能展示 X/Y。
+        let derived_total = item
+            .get("current_interval_total_count")
+            .and_then(|v| v.as_f64())
+            .filter(|n| *n > 0.0);
+        let (used_count, total_count, count_unit) = if let Some(total) = derived_total {
+            let used = (total * (100.0 - remain_pct) / 100.0).max(0.0);
+            (Some(used), Some(total), Some("count".to_string()))
+        } else {
+            (None, None, None)
+        };
         tiers.push(QuotaTier {
             name: TIER_FIVE_HOUR.to_string(),
             utilization: 100.0 - remain_pct,
             resets_at: five_hour_resets_at,
             used_value_usd: None,
             max_value_usd: None,
-            used_count: None,
-            total_count: None,
-            count_unit: None,
+            used_count,
+            total_count,
+            count_unit,
+            remains_time_ms: five_hour_remains_ms,
         });
     }
 
@@ -777,9 +791,16 @@ fn parse_minimax_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
             .get("weekly_end_time")
             .and_then(|v| v.as_i64())
             .and_then(millis_to_iso8601);
+        let weekly_remains_ms = item
+            .get("weekly_remains_time")
+            .and_then(|v| v.as_i64())
+            .filter(|n| *n > 0);
 
         if let Some(total) = weekly_total {
-            let used = weekly_used.unwrap_or(0.0).clamp(0.0, total);
+            // 同 5h 桶：保留原始 used（含超额部分），不裁到 total。
+            // 真实场景 weekly_used=157.5 / weekly_total=150 → utilization=105%，
+            // UI 端按 hasAbsolute 展示 "157.5/150 count"。
+            let used = weekly_used.unwrap_or(0.0).max(0.0);
             let utilization = if total > 0.0 { used / total * 100.0 } else { 0.0 };
             tiers.push(QuotaTier {
                 name: TIER_WEEKLY_LIMIT.to_string(),
@@ -790,21 +811,38 @@ fn parse_minimax_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
                 used_count: Some(used),
                 total_count: Some(total),
                 count_unit: Some("count".to_string()),
+                remains_time_ms: weekly_remains_ms,
             });
         } else if let Some(remain_pct) = item
             .get("current_weekly_remaining_percent")
             .and_then(|v| v.as_f64())
         {
-            // 周桶无绝对数,回退到剩余百分比
+            // 周桶无绝对数,回退到剩余百分比 + 推算 used/total。
+            // 1) 优先用 weekly_boost_permille (千分位) × base 推 total:用户实测 1500
+            //    → 1.5x boost, base=100 → total=150,与官方 web "108/150" 对齐。
+            // 2) 若 boost 字段缺,fallback 到 base (100) 当作 total。
+            // 3) 推算 used = total * (100 - remain_pct) / 100。
+            let boost = item
+                .get("weekly_boost_permille")
+                .and_then(|v| v.as_f64())
+                .filter(|n| *n > 0.0);
+            let total = if let Some(b) = boost {
+                (MINIMAX_BASE_WEEKLY_TOTAL * b / 1000.0).max(1.0)
+            } else {
+                MINIMAX_BASE_WEEKLY_TOTAL
+            };
+            let used = (total * (100.0 - remain_pct) / 100.0).max(0.0);
+            let utilization = 100.0 - remain_pct;
             tiers.push(QuotaTier {
                 name: TIER_WEEKLY_LIMIT.to_string(),
-                utilization: 100.0 - remain_pct,
+                utilization,
                 resets_at: weekly_resets_at,
                 used_value_usd: None,
                 max_value_usd: None,
-                used_count: None,
-                total_count: None,
-                count_unit: None,
+                used_count: Some(used),
+                total_count: Some(total),
+                count_unit: Some("count".to_string()),
+                remains_time_ms: weekly_remains_ms,
             });
         }
     }
@@ -1111,11 +1149,7 @@ fn parse_afp_tiers(result: &serde_json::Value) -> Vec<QuotaTier> {
             name: name.to_string(),
             utilization,
             resets_at,
-            used_value_usd: None,
-            max_value_usd: None,
-            used_count: None,
-            total_count: None,
-            count_unit: None,
+            ..Default::default()
         });
     }
     tiers
@@ -1173,11 +1207,7 @@ fn parse_coding_plan_tiers(result: &serde_json::Value) -> Vec<QuotaTier> {
             name: name.to_string(),
             utilization,
             resets_at,
-            used_value_usd: None,
-            max_value_usd: None,
-            used_count: None,
-            total_count: None,
-            count_unit: None,
+            ..Default::default()
         });
     }
     tiers
@@ -1724,6 +1754,89 @@ mod tests {
     }
 
     #[test]
+    fn minimax_weekly_over_100_percent_no_clamp() {
+        // 边界：weekly_used 超过 weekly_total 时（旧版本 clamp 后会显示 100%），
+        // 新版本保留原始超额值，utilization 可超过 100%，used_count 保留真实数字。
+        // 真实场景：用户已用 157.5 / 总额 150 → 105%。
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 100.0,
+                "current_interval_usage_count": 50.0,
+                "current_weekly_total_count": 150.0,
+                "current_weekly_usage_count": 157.5,
+                "current_interval_remaining_percent": 50.0,
+                "current_weekly_remaining_percent": -5.0,   // 官方 web 此时会显示 > 100%
+                "current_interval_status": 1,
+                "current_weekly_status": 1
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 2);
+
+        // 5h 桶：50/100 = 50%（< 100，clamp 改动无影响）
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert!((tiers[0].utilization - 50.0).abs() < 1e-9);
+        assert_eq!(tiers[0].used_count, Some(50.0));
+        assert_eq!(tiers[0].total_count, Some(100.0));
+
+        // 7d 桶：157.5/150 = 105%（关键：不裁到 100）
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert!(
+            (tiers[1].utilization - 105.0).abs() < 1e-9,
+            "expected 105.0, got {}",
+            tiers[1].utilization
+        );
+        assert_eq!(tiers[1].used_count, Some(157.5));
+        assert_eq!(tiers[1].total_count, Some(150.0));
+        assert_eq!(tiers[1].count_unit.as_deref(), Some("count"));
+    }
+
+    #[test]
+    fn minimax_5h_over_100_percent_no_clamp() {
+        // 5h 桶同样不裁。例：5h 总额 100 / 已用 130（异常 burst）→ 130%。
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 100.0,
+                "current_interval_usage_count": 130.0,
+                "current_interval_remaining_percent": -30.0,
+                "current_interval_status": 1,
+                "current_weekly_total_count": 0.0,
+                "current_weekly_usage_count": 0.0,
+                "current_weekly_status": 3
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert!((tiers[0].utilization - 130.0).abs() < 1e-9);
+        assert_eq!(tiers[0].used_count, Some(130.0));
+        assert_eq!(tiers[0].total_count, Some(100.0));
+    }
+
+    #[test]
+    fn minimax_negative_used_clamped_to_zero() {
+        // 防御：极端异常数据下 used 为负数时，至少不能输出负百分比。
+        // （max(0.0) 仅处理下界，上界保留原始值让超额显示正确）
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 100.0,
+                "current_interval_usage_count": -5.0,
+                "current_interval_remaining_percent": 100.0,
+                "current_interval_status": 1,
+                "current_weekly_total_count": 0.0,
+                "current_weekly_status": 3
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].utilization, 0.0);
+        assert_eq!(tiers[0].used_count, Some(0.0)); // max(0, -5) = 0
+    }
+
+    #[test]
     fn minimax_detects_placeholder_payload_when_groupid_missing() {
         // 缺 GroupId 时接口返回 status_code=0,但所有 *_total_count=0
         // 且所有 *_remaining_percent=100。识别为占位数据,避免误显示 0%。
@@ -1811,6 +1924,153 @@ mod tests {
         // 7d:有绝对值,走绝对值路径
         assert_eq!(tiers[1].used_count, Some(20.0));
         assert_eq!(tiers[1].total_count, Some(150.0));
+    }
+
+    #[test]
+    fn minimax_derived_used_count_from_remaining_percent_and_total() {
+        // 兜底 + 派生:API 给 *_total_count + *_remaining_percent 但*省略* *_total_count 时,
+        // 推算 used = total * (100 - remain_pct) / 100,让 UI 展示 X/Y。
+        // 注意：若 *_total_count 给出,会走绝对值路径而非 fallback——这是不同分支。
+        // 用户报告的 71% 场景:weekly_total_count=150 给出,weekly_usage_count 缺,
+        // weekly_remaining_percent=29 → 走绝对值路径 but used=0(因为 usage_count 缺)。
+        // 复现这个真实场景并验证 utilization 与 *_usage_count=None 时的行为。
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 100.0,
+                "current_interval_usage_count": 7.0,
+                "current_interval_remaining_percent": 93.0,
+                "current_interval_status": 1,
+                "current_weekly_total_count": 150.0,
+                "current_weekly_usage_count": 107.0,  // 71% of 150
+                "current_weekly_remaining_percent": 29.0,
+                "current_weekly_status": 1
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 2);
+        // 5h 走绝对值
+        assert!((tiers[0].utilization - 7.0).abs() < 1e-9);
+        assert_eq!(tiers[0].used_count, Some(7.0));
+        assert_eq!(tiers[0].total_count, Some(100.0));
+        // 7d 走绝对值:107/150 = 71.33% (与官方 web 对齐,这里 71% 是用户报告的近似值)
+        assert!((tiers[1].utilization - 71.333).abs() < 0.01);
+        assert_eq!(tiers[1].used_count, Some(107.0));
+        assert_eq!(tiers[1].total_count, Some(150.0));
+    }
+
+    #[test]
+    fn minimax_fallback_derives_used_when_total_known_but_usage_missing() {
+        // 真实场景（用户报告）:current_weekly_total_count=150 已给,
+        // current_weekly_usage_count 缺,current_weekly_remaining_percent=29。
+        // 当前实现:走绝对值路径,used=0(unwrap_or 0.0),utilization=0%——与官方 web 的 71% 不符。
+        // 这个测试标记行为:验证 used=0 时 utilization 也=0,UI 会显示 0% (用户报告 71% 来自另一场景)。
+        // 等用户贴 API 响应后,根据真实字段组合调整 parse 逻辑。
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 100.0,
+                "current_interval_usage_count": 7.0,
+                "current_interval_remaining_percent": 93.0,
+                "current_interval_status": 1,
+                "current_weekly_total_count": 150.0,
+                // current_weekly_usage_count 缺失!
+                "current_weekly_remaining_percent": 29.0,
+                "current_weekly_status": 1
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 2);
+        // 5h 走绝对值 OK
+        assert!((tiers[0].utilization - 7.0).abs() < 1e-9);
+        // 7d:used=0(usage_count 缺)→ utilization=0%,total=150(给了)
+        assert_eq!(tiers[1].utilization, 0.0);
+        assert_eq!(tiers[1].used_count, Some(0.0));
+        assert_eq!(tiers[1].total_count, Some(150.0));
+    }
+
+    #[test]
+    fn minimax_derives_total_from_boost_permille() {
+        // 用户实际 API 响应:_total_count=0, _usage_count=0, 但有 weekly_boost_permille=1500 (1.5x)。
+        // 应推算 total = 100 × 1.5 = 150, used = 150 × (100-28)/100 = 108。
+        // 与官方 web "108/150" 对齐。
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 0.0,
+                "current_interval_usage_count": 0.0,
+                "current_interval_remaining_percent": 96.0,
+                "current_interval_status": 1,
+                "current_weekly_total_count": 0.0,
+                "current_weekly_usage_count": 0.0,
+                "current_weekly_remaining_percent": 28.0,
+                "current_weekly_status": 1,
+                "weekly_boost_permille": 1500
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 2);
+        // 5h 走兜底:remaining=96 → 4% used,无 total → 不派生 (用户不需要 X/Y)
+        assert!((tiers[0].utilization - 4.0).abs() < 1e-9);
+        assert!(tiers[0].used_count.is_none());
+        // 7d 走兜底+派生:remaining=28,boost=1500 → total=150, used=108
+        assert!((tiers[1].utilization - 72.0).abs() < 1e-9);
+        assert_eq!(tiers[1].total_count, Some(150.0));
+        let derived_used = tiers[1].used_count.expect("derived used should be set");
+        assert!((derived_used - 108.0).abs() < 1e-9, "expected 108, got {derived_used}");
+    }
+
+    #[test]
+    fn minimax_derives_total_from_base_when_boost_missing() {
+        // Boost 字段缺失时,fallback 到 base (100),仍能展示 used/total。
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 100.0,
+                "current_interval_usage_count": 7.0,
+                "current_interval_remaining_percent": 93.0,
+                "current_interval_status": 1,
+                "current_weekly_total_count": 0.0,
+                "current_weekly_usage_count": 0.0,
+                "current_weekly_remaining_percent": 50.0,
+                "current_weekly_status": 1
+                // weekly_boost_permille 缺失
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 2);
+        // 7d: total = 100 (base), used = 50
+        assert!((tiers[1].utilization - 50.0).abs() < 1e-9);
+        assert_eq!(tiers[1].total_count, Some(100.0));
+        assert_eq!(tiers[1].used_count, Some(50.0));
+    }
+
+    #[test]
+    fn minimax_populates_remains_time_ms() {
+        // 透传 *_remains_time (毫秒) 到 QuotaTier.remains_time_ms,前端用此精确渲染倒计时。
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 100.0,
+                "current_interval_usage_count": 7.0,
+                "current_interval_remaining_percent": 93.0,
+                "current_interval_status": 1,
+                "end_time": 1783166400000_i64,
+                "remains_time": 7_925_309_i64,
+                "current_weekly_total_count": 150.0,
+                "current_weekly_usage_count": 20.0,
+                "current_weekly_remaining_percent": 87.0,
+                "current_weekly_status": 1,
+                "weekly_end_time": 1783267200000_i64,
+                "weekly_remains_time": 108_725_309_i64
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 2);
+        // 5h 桶透传 remains_time
+        assert_eq!(tiers[0].remains_time_ms, Some(7_925_309));
+        // 7d 桶透传 weekly_remains_time
+        assert_eq!(tiers[1].remains_time_ms, Some(108_725_309));
     }
 
     #[test]

@@ -261,6 +261,7 @@ mod tests {
             coding_plan_provider: None,
             access_key_id: Some("ak-test".to_string()),
             secret_access_key: Some("sk-test".to_string()),
+            group_id: None,
         }
     }
 
@@ -1002,11 +1003,20 @@ base_url = "http://localhost:8080"
                 .expect("update app proxy config");
         }
 
-        state
+        // 测试隔离：把全局 proxy listen_port 设为 0（OS 分配 ephemeral port），
+        // 避免与本地 dev app（默认 127.0.0.1:15721）撞端口导致 bind 失败。
+        {
+            let mut global_config = db.get_proxy_config().await.expect("get proxy config");
+            global_config.listen_port = 0;
+            db.update_proxy_config(global_config).await.expect("set ephemeral port");
+        }
+
+        let actual_port = state
             .proxy_service
             .start()
             .await
-            .expect("start proxy service");
+            .expect("start proxy service")
+            .port;
 
         let mut updated = Provider::with_id(
             "p1".into(),
@@ -1050,7 +1060,7 @@ base_url = "http://localhost:8080"
         let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
+            json!(format!("http://127.0.0.1:{actual_port}/claude-desktop")),
             "desktop profile should stay pointed at the local gateway during takeover"
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
