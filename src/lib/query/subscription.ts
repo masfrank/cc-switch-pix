@@ -5,7 +5,7 @@ import type { ProviderMeta } from "@/types";
 import { resolveManagedAccountId } from "@/lib/authBinding";
 import { PROVIDER_TYPES } from "@/config/constants";
 
-const REFETCH_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const REFETCH_INTERVAL = 1 * 60 * 1000; // 1 minute
 
 export const subscriptionKeys = {
   all: ["subscription"] as const,
@@ -16,7 +16,7 @@ export function useSubscriptionQuota(
   appId: AppId,
   enabled: boolean,
   autoQuery = false,
-  autoQueryIntervalMinutes = 5,
+  autoQueryIntervalMinutes = 1,
 ) {
   const refetchInterval =
     autoQuery && autoQueryIntervalMinutes > 0

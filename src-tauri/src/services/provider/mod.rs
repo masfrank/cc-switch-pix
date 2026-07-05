@@ -5,7 +5,8 @@
 mod endpoints;
 mod gemini_auth;
 mod live;
-mod usage;
+pub(crate) mod per_key_live;
+pub mod usage;
 
 use indexmap::IndexMap;
 use regex::Regex;
@@ -260,6 +261,7 @@ mod tests {
             coding_plan_provider: None,
             access_key_id: Some("ak-test".to_string()),
             secret_access_key: Some("sk-test".to_string()),
+            group_id: None,
         }
     }
 
@@ -1001,11 +1003,20 @@ base_url = "http://localhost:8080"
                 .expect("update app proxy config");
         }
 
-        state
+        // 测试隔离：把全局 proxy listen_port 设为 0（OS 分配 ephemeral port），
+        // 避免与本地 dev app（默认 127.0.0.1:15721）撞端口导致 bind 失败。
+        {
+            let mut global_config = db.get_proxy_config().await.expect("get proxy config");
+            global_config.listen_port = 0;
+            db.update_proxy_config(global_config).await.expect("set ephemeral port");
+        }
+
+        let actual_port = state
             .proxy_service
             .start()
             .await
-            .expect("start proxy service");
+            .expect("start proxy service")
+            .port;
 
         let mut updated = Provider::with_id(
             "p1".into(),
@@ -1049,7 +1060,7 @@ base_url = "http://localhost:8080"
         let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
+            json!(format!("http://127.0.0.1:{actual_port}/claude-desktop")),
             "desktop profile should stay pointed at the local gateway during takeover"
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
@@ -1543,6 +1554,50 @@ base_url = "http://localhost:8080"
                 "OMO config should roll back to its previous on-disk contents"
             );
         });
+    }
+}
+
+/// Test helper shared across the provider service module's per-file tests.
+/// (E.g. `per_key_live::tests` references this instead of redeclaring a
+/// near-duplicate inside every test submodule.)
+#[cfg(test)]
+pub mod mod_test {
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use crate::database::Database;
+    use crate::store::AppState;
+
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    fn guard() -> MutexGuard<'static, ()> {
+        TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    pub fn with_test_home<T>(test: impl FnOnce(&AppState, &Path) -> T) -> T {
+        let _g = guard();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
+
+        let db = std::sync::Arc::new(Database::memory().expect("in-memory database"));
+        let state = AppState::new(db);
+        let result = test(&state, temp.path());
+
+        match old_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+
+        result
     }
 }
 
