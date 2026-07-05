@@ -1094,6 +1094,10 @@ pub fn run() {
                         crate::services::session_usage::sync_claude_session_logs(db),
                     );
                     run_step(
+                        "Cowork usage initial sync",
+                        crate::services::session_usage_cowork::sync_cowork_usage(db),
+                    );
+                    run_step(
                         "Codex usage initial sync",
                         crate::services::session_usage_codex::sync_codex_usage(db),
                     );
@@ -1116,6 +1120,10 @@ pub fn run() {
                         run_step(
                             "Session usage periodic sync",
                             crate::services::session_usage::sync_claude_session_logs(db),
+                        );
+                        run_step(
+                            "Cowork usage periodic sync",
+                            crate::services::session_usage_cowork::sync_cowork_usage(db),
                         );
                         run_step(
                             "Codex usage periodic sync",
