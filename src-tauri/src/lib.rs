@@ -22,6 +22,7 @@ mod mcp;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
+pub mod pi_config;
 mod prompt;
 mod prompt_files;
 mod provider;
@@ -1417,6 +1418,12 @@ pub fn run() {
             // OpenCode specific
             commands::import_opencode_providers_from_live,
             commands::get_opencode_live_provider_ids,
+            // Pi Agent specific
+            commands::list_pi_providers,
+            commands::preview_pi_provider_patch,
+            commands::apply_pi_provider_patch,
+            commands::delete_pi_provider,
+            commands::test_pi_connectivity,
             // OpenClaw specific
             commands::import_openclaw_providers_from_live,
             commands::get_openclaw_live_provider_ids,
