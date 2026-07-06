@@ -10,6 +10,7 @@ pub mod omo;
 pub mod prompt;
 pub mod provider;
 pub mod proxy;
+pub mod pxpipe;
 pub mod s3;
 pub mod s3_auto_sync;
 pub mod s3_sync;
@@ -35,6 +36,7 @@ pub use omo::OmoService;
 pub use prompt::PromptService;
 pub use provider::{ProviderService, ProviderSortUpdate, SwitchResult};
 pub use proxy::ProxyService;
+pub use pxpipe::PxpipeService;
 #[allow(unused_imports)]
 pub use skill::{DiscoverableSkill, Skill, SkillRepo, SkillService};
 pub use speedtest::{EndpointLatency, SpeedtestService};

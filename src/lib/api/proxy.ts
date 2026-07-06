@@ -3,6 +3,8 @@ import type {
   ProxyConfig,
   ProxyStatus,
   ProxyServerInfo,
+  PxpipeConfig,
+  PxpipeStatus,
   ProxyTakeoverStatus,
   GlobalProxyConfig,
   AppProxyConfig,
@@ -69,6 +71,28 @@ export const proxyApi = {
   // 更新代理配置（旧版 v2 兼容接口）
   async updateProxyConfig(config: ProxyConfig): Promise<void> {
     return invoke("update_proxy_config", { config });
+  },
+
+  // ========== PxPipe Bridge API ==========
+
+  async getPxpipeConfig(): Promise<PxpipeConfig> {
+    return invoke("get_pxpipe_config");
+  },
+
+  async updatePxpipeConfig(config: PxpipeConfig): Promise<void> {
+    return invoke("update_pxpipe_config", { config });
+  },
+
+  async getPxpipeStatus(): Promise<PxpipeStatus> {
+    return invoke("get_pxpipe_status");
+  },
+
+  async startPxpipeBridge(): Promise<PxpipeStatus> {
+    return invoke("start_pxpipe_bridge");
+  },
+
+  async stopPxpipeBridge(): Promise<PxpipeStatus> {
+    return invoke("stop_pxpipe_bridge");
   },
 
   // ========== v3+ 全局/应用级配置 API ==========

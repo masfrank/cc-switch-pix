@@ -1353,6 +1353,11 @@ pub fn run() {
             commands::get_proxy_status,
             commands::get_proxy_config,
             commands::update_proxy_config,
+            commands::get_pxpipe_config,
+            commands::update_pxpipe_config,
+            commands::get_pxpipe_status,
+            commands::start_pxpipe_bridge,
+            commands::stop_pxpipe_bridge,
             // Global & Per-App Config
             commands::get_global_proxy_config,
             commands::update_global_proxy_config,
@@ -1664,6 +1669,10 @@ pub fn run() {
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         let proxy_service = &state.proxy_service;
+
+        if let Err(e) = state.pxpipe_service.stop().await {
+            log::error!("退出时停止 PxPipe bridge 失败: {e}");
+        }
 
         // 退出时也需要兜底：代理可能已崩溃/未运行，但 Live 接管残留仍在（占位符/备份）。
         let has_backups = match state.db.has_any_live_backup().await {

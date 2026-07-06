@@ -2,7 +2,11 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { proxyApi } from "@/lib/api/proxy";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
-import type { GlobalProxyConfig, AppProxyConfig } from "@/types/proxy";
+import type {
+  GlobalProxyConfig,
+  AppProxyConfig,
+  PxpipeConfig,
+} from "@/types/proxy";
 
 // ========== 代理服务器状态 Hooks ==========
 
@@ -163,6 +167,98 @@ export function useProxyConfig() {
     updateConfig: updateMutation.mutateAsync,
     isUpdating: updateMutation.isPending,
   };
+}
+
+// ========== PxPipe Bridge Hooks ==========
+
+export function usePxpipeConfig() {
+  return useQuery({
+    queryKey: ["pxpipeConfig"],
+    queryFn: () => proxyApi.getPxpipeConfig(),
+  });
+}
+
+export function usePxpipeStatus() {
+  return useQuery({
+    queryKey: ["pxpipeStatus"],
+    queryFn: () => proxyApi.getPxpipeStatus(),
+    refetchInterval: 2000,
+  });
+}
+
+export function useUpdatePxpipeConfig() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: (config: PxpipeConfig) => proxyApi.updatePxpipeConfig(config),
+    onSuccess: () => {
+      toast.success(
+        t("proxy.pxpipe.saved", { defaultValue: "PxPipe 配置已保存" }),
+        { closeButton: true },
+      );
+      queryClient.invalidateQueries({ queryKey: ["pxpipeConfig"] });
+      queryClient.invalidateQueries({ queryKey: ["pxpipeStatus"] });
+    },
+    onError: (error: Error) => {
+      toast.error(
+        t("proxy.pxpipe.saveFailed", {
+          error: error.message,
+          defaultValue: "保存 PxPipe 配置失败: {{error}}",
+        }),
+      );
+    },
+  });
+}
+
+export function useStartPxpipeBridge() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: () => proxyApi.startPxpipeBridge(),
+    onSuccess: () => {
+      toast.success(
+        t("proxy.pxpipe.started", { defaultValue: "PxPipe 已启动" }),
+        { closeButton: true },
+      );
+      queryClient.invalidateQueries({ queryKey: ["pxpipeConfig"] });
+      queryClient.invalidateQueries({ queryKey: ["pxpipeStatus"] });
+    },
+    onError: (error: Error) => {
+      toast.error(
+        t("proxy.pxpipe.startFailed", {
+          error: error.message,
+          defaultValue: "启动 PxPipe 失败: {{error}}",
+        }),
+      );
+    },
+  });
+}
+
+export function useStopPxpipeBridge() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: () => proxyApi.stopPxpipeBridge(),
+    onSuccess: () => {
+      toast.success(
+        t("proxy.pxpipe.stopped", { defaultValue: "PxPipe 已停止" }),
+        { closeButton: true },
+      );
+      queryClient.invalidateQueries({ queryKey: ["pxpipeConfig"] });
+      queryClient.invalidateQueries({ queryKey: ["pxpipeStatus"] });
+    },
+    onError: (error: Error) => {
+      toast.error(
+        t("proxy.pxpipe.stopFailed", {
+          error: error.message,
+          defaultValue: "停止 PxPipe 失败: {{error}}",
+        }),
+      );
+    },
+  });
 }
 
 // ========== v3+ 全局/应用级配置 Hooks ==========

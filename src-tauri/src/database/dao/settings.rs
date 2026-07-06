@@ -324,4 +324,27 @@ impl Database {
             .map_err(|e| AppError::Database(format!("序列化日志配置失败: {e}")))?;
         self.set_setting("log_config", &json)
     }
+
+    // --- PxPipe bridge 配置 ---
+
+    /// 获取 PxPipe bridge 配置。
+    ///
+    /// PxPipe 不保存供应商密钥；这里只保存本地桥接进程的启动参数。
+    pub fn get_pxpipe_config(&self) -> Result<crate::services::pxpipe::PxpipeConfig, AppError> {
+        match self.get_setting("pxpipe_config")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析 PxPipe 配置失败: {e}"))),
+            None => Ok(crate::services::pxpipe::PxpipeConfig::default()),
+        }
+    }
+
+    /// 更新 PxPipe bridge 配置。
+    pub fn set_pxpipe_config(
+        &self,
+        config: &crate::services::pxpipe::PxpipeConfig,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| AppError::Database(format!("序列化 PxPipe 配置失败: {e}")))?;
+        self.set_setting("pxpipe_config", &json)
+    }
 }

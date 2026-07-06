@@ -41,6 +41,25 @@ export interface ProxyServerInfo {
   started_at: string;
 }
 
+export interface PxpipeConfig {
+  enabled: boolean;
+  command: string;
+  args: string[];
+  listenHost: string;
+  listenPort: number;
+  models: string;
+  logPath?: string;
+}
+
+export interface PxpipeStatus {
+  running: boolean;
+  pid?: number;
+  listenUrl: string;
+  dashboardUrl: string;
+  upstreamUrl: string;
+  lastError?: string;
+}
+
 export interface ProxyTakeoverStatus {
   claude: boolean;
   "claude-desktop"?: boolean;

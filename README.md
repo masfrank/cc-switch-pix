@@ -217,6 +217,7 @@ Modern AI-powered coding relies on tools like Claude Code, Claude Desktop, Codex
 
 - **Local proxy with hot-switching** — Format conversion, auto-failover, circuit breaker, provider health monitoring, and request rectifier
 - **App-level takeover** — Independently proxy Claude, Codex, or Gemini, down to individual providers
+- **Optional PxPipe bridge guidance** — Route Claude Code through PxPipe (`127.0.0.1:47821`) into the CC Switch local proxy (`127.0.0.1:15721`) while keeping provider selection in CC Switch
 
 ### MCP, Prompts & Skills
 
