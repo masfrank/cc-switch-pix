@@ -294,9 +294,7 @@ export function PxpipeSettings() {
           id="pxpipe-log-path"
           label={t("proxy.pxpipe.logPath", { defaultValue: "Log path" })}
           value={form.logPath ?? ""}
-          onChange={(value) =>
-            setForm((prev) => ({ ...prev, logPath: value }))
-          }
+          onChange={(value) => setForm((prev) => ({ ...prev, logPath: value }))}
           placeholder={t("common.optional", { defaultValue: "可选" })}
         />
       </div>
