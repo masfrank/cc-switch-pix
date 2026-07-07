@@ -54,7 +54,8 @@ export function PxpipeSettings() {
   }, [config]);
 
   const listenUrl =
-    status?.listenUrl || `http://${form.listenHost}:${portText || form.listenPort}`;
+    status?.listenUrl ||
+    `http://${form.listenHost}:${portText || form.listenPort}`;
   const claudeHint = `ANTHROPIC_BASE_URL=${listenUrl} claude`;
   const isPending =
     updateConfig.isPending || startBridge.isPending || stopBridge.isPending;
@@ -181,7 +182,11 @@ export function PxpipeSettings() {
               {t("common.start", { defaultValue: "启动" })}
             </Button>
           )}
-          <Button size="sm" onClick={() => void handleSave()} disabled={isPending}>
+          <Button
+            size="sm"
+            onClick={() => void handleSave()}
+            disabled={isPending}
+          >
             {updateConfig.isPending ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             ) : (

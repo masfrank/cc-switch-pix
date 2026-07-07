@@ -110,7 +110,9 @@ impl PxpipeService {
     pub fn update_config(&self, config: PxpipeConfig) -> Result<(), String> {
         let config = config.normalized();
         Self::validate_config(&config)?;
-        self.db.set_pxpipe_config(&config).map_err(|e| e.to_string())
+        self.db
+            .set_pxpipe_config(&config)
+            .map_err(|e| e.to_string())
     }
 
     pub async fn get_status(&self) -> Result<PxpipeStatus, String> {
@@ -202,13 +204,7 @@ impl PxpipeService {
             upstream_url
         );
 
-        Ok(Self::build_status(
-            &config,
-            upstream_url,
-            true,
-            pid,
-            None,
-        ))
+        Ok(Self::build_status(&config, upstream_url, true, pid, None))
     }
 
     pub async fn stop(&self) -> Result<PxpipeStatus, String> {
@@ -222,9 +218,7 @@ impl PxpipeService {
                         runtime.last_error = Some(format!("PxPipe exited before stop: {status}"));
                     }
                     Ok(None) => {
-                        child
-                            .kill()
-                            .map_err(|e| format!("停止 PxPipe 失败: {e}"))?;
+                        child.kill().map_err(|e| format!("停止 PxPipe 失败: {e}"))?;
                         let _ = child.wait();
                         runtime.last_error = None;
                     }
@@ -272,7 +266,10 @@ impl PxpipeService {
             return Err("CC Switch 代理监听端口为 0，无法为 PxPipe 生成上游地址".to_string());
         }
 
-        Ok(format!("http://{}:{}", connect_host, proxy_config.listen_port))
+        Ok(format!(
+            "http://{}:{}",
+            connect_host, proxy_config.listen_port
+        ))
     }
 
     async fn build_upstream_url_for_status(&self) -> String {
